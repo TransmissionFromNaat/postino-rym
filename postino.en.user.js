@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Postino
 // @namespace    postino-rym-en
-// @version      1.0
+// @version      1.0.1
 // @description  Brings the data of a Discogs or Bandcamp release into the RateYourMusic "Add Release" form, following the RYM rules. It never submits anything: preview and submit stay with you.
 // @match        https://www.discogs.com/*
 // @match        https://*.bandcamp.com/*
@@ -18,7 +18,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-// Postino 1.0 — Discogs / Bandcamp → RateYourMusic
+// Postino 1.0.1 — Discogs / Bandcamp → RateYourMusic
 // How to use: on a Discogs release or a Bandcamp album press "→ RYM" (bottom right);
 // then, on the RYM "Add release" page, press "Fill form" in the panel and check the "To do" items.
 
@@ -33,6 +33,7 @@
   const $ = (sel) => document.querySelector(sel);
   const pad2 = (n) => String(n).padStart(2, '0');
   const isVarious = (name) => /^various( artists)?$/i.test(clean(name));
+  const MEDIA_LABEL = { cd: 'CD', dvd: 'DVD', bluray: 'Blu-ray', bd: 'Blu-ray', sacd: 'SACD', vhs: 'VHS' };
 
   function css(el, styles) { Object.assign(el.style, styles); return el; }
 
@@ -90,6 +91,7 @@
   //  DISCOGS SIDE
   // =====================================================================
   if (host.endsWith('discogs.com')) {
+    let latestRequest = null;
     const b = floatingButton(onDiscogsClick);
     b.style.display = 'none';
 
@@ -101,12 +103,15 @@
     function onDiscogsClick() {
       const m = location.pathname.match(/\/release\/(\d+)/);
       if (!m) return toast('Open a Discogs release page.', false);
+      const request = Symbol();
+      latestRequest = request;
       b.textContent = 'Loading…';
       GM_xmlhttpRequest({
         method: 'GET',
         url: 'https://api.discogs.com/releases/' + m[1],
         headers: { Accept: 'application/json' },
         onload: (r) => {
+          if (request !== latestRequest) return;
           b.textContent = '→ RYM';
           if (r.status !== 200) return toast('Discogs API error: ' + r.status, false);
           const d = JSON.parse(r.responseText);
@@ -118,13 +123,14 @@
             url: 'https://api.discogs.com/masters/' + d.master_id,
             headers: { Accept: 'application/json' },
             onload: (m) => {
+              if (request !== latestRequest) return;
               try { const mj = JSON.parse(m.responseText); data.masterYear = mj.year || null; data.mainRelease = mj.main_release || null; } catch (e) { /* ignore */ }
               sendToRym(data);
             },
-            onerror: () => sendToRym(data)
+            onerror: () => { if (request === latestRequest) sendToRym(data); }
           });
         },
-        onerror: () => { b.textContent = '→ RYM'; toast('Discogs API request failed.', false); }
+        onerror: () => { if (request === latestRequest) { b.textContent = '→ RYM'; toast('Discogs API request failed.', false); } }
       });
     }
 
@@ -159,11 +165,17 @@
         (list || []).forEach((x) => { a += clean(x.anv || x.name); if (x.join) a += x.join === ',' ? ', ' : ' ' + x.join + ' '; });
         return pipe(a.trim());
       };
+      const partSuffix = (i) => i < 26 ? String.fromCharCode(97 + i)
+        : partSuffix(Math.floor(i / 26) - 1) + partSuffix(i % 26);
+      let medium = {};
       let n = 0;
       const tracks = [];
       (d.tracklist || []).forEach((t) => {
         if (t.type_ === 'heading') {
           const h = (t.title || '').trim();
+          const m = h.match(/^(cd|dvd|blu-?ray|bd|sacd|vhs)(?=\s|\d|$|[-.:#])\s*[-.:#]?\s*(\d+)?/i);
+          if (m || PLAIN_MEDIA_HEADING.test(h)) medium = m
+            ? { media: MEDIA_LABEL[m[1].toLowerCase().replace('-', '')], disc: +(m[2] || 1) } : {};
           if (!h || SIDE_HEADING.test(h) || PLAIN_MEDIA_HEADING.test(h)) return;
           const row = { pos: '', title: pipe(h), dur: '', header: true };
           if (MEDIA_HEADING.test(h)) row.mediaHeading = true; // replaced by the "CD"/"DVD" line when there are several media
@@ -171,18 +183,25 @@
           return;
         }
         if (t.type_ === 'index' && Array.isArray(t.sub_tracks) && t.sub_tracks.length) {
+          const positions = t.sub_tracks.map((s) => (s.position || '').trim());
+          const prefix = positions.find(Boolean)?.match(/^(.+)\.\d+$/)?.[1];
+          const inferred = prefix && positions.every((p) => !p || (p.startsWith(prefix + '.')
+            && /^\d+$/.test(p.slice(prefix.length + 1)))) ? prefix : '';
+          const parent = (t.position || '').trim() || inferred;
           tracks.push({ pos: '', title: pipe(t.title), dur: '', header: true });
           t.sub_tracks.forEach((s, k) => {
             n++;
             // no position: "3a, 3b…" if the work has a number, otherwise running numbers
-            const pos = (s.position || '').trim() || ((t.position || '').trim() ? t.position.trim() + String.fromCharCode(97 + k) : String(n));
-            tracks.push({ pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(s.artists || t.artists) });
+            const position = (s.position || '').trim();
+            const dotted = parent && position.startsWith(parent + '.') && /^\d+$/.test(position.slice(parent.length + 1));
+            const pos = !position || dotted ? (parent ? parent + partSuffix(k) : String(n)) : position;
+            tracks.push({ ...medium, pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(s.artists || t.artists) });
           });
           return;
         }
         if (t.type_ === 'track' || t.type_ === 'index') {
           n++;
-          tracks.push({ pos: (t.position || String(n)).trim(), title: pipe(t.title), dur: t.duration || '', artist: artistOf(t.artists) });
+          tracks.push({ ...medium, pos: (t.position || String(n)).trim(), title: pipe(t.title), dur: t.duration || '', artist: artistOf(t.artists) });
         }
       });
 
@@ -203,6 +222,8 @@
         various: (d.artists || []).some((a) => isVarious(a.name)),
         classical,
         descriptions: (d.formats || []).flatMap((x) => x.descriptions || []),
+        mainDescriptions: [...(f.descriptions || []), ...(d.formats || [])
+          .filter((x) => ['Box Set', 'All Media'].includes(x.name)).flatMap((x) => x.descriptions || [])],
         formatTexts: (d.formats || []).map((x) => x.text || '').filter(Boolean),
         // free text of the vinyl/shellac media only (the colour of an included CD does not count)
         vinylTexts: (d.formats || []).filter((x) => /vinyl|lathe|flexi|shellac/i.test(x.name || '')).map((x) => x.text || '').filter(Boolean),
@@ -269,9 +290,15 @@
       const artist = (tr?.artist || ld?.byArtist?.name || '').trim();
       if (!title || !artist) throw new Error('Missing title or artist.');
 
-      // Label: the publishing account, only if different from the artist (label pages)
+      // Use the digital issue's label first, then the publishing account if it differs from the artist.
       const publisher = (ld?.publisher?.name || '').trim();
-      const labels = publisher && publisher.toLowerCase() !== artist.toLowerCase() ? [{ name: publisher, catno: '', noCat: false }] : [];
+      const releases = [].concat(ld?.albumRelease || ld?.inAlbum?.albumRelease || []);
+      const digitalRelease = releases.find((r) => r?.musicReleaseFormat === 'DigitalFormat');
+      const recordLabel = digitalRelease?.recordLabel || ld?.recordLabel;
+      const explicitLabel = typeof recordLabel === 'string' ? recordLabel.trim()
+        : (typeof recordLabel?.name === 'string' ? recordLabel.name.trim() : '');
+      const labelName = explicitLabel || (publisher.toLowerCase() !== artist.toLowerCase() ? publisher : '');
+      const labels = labelName ? [{ name: labelName, catno: '', noCat: false }] : [];
 
       // Date, e.g. "15 Mar 2019 00:00:00 GMT"
       let year = '', month = '', day = '', oldDate = '';
@@ -293,7 +320,7 @@
       // Tracks: from the data-tralbum block first, otherwise from schema.org
       let tracks = [];
       if (tr && Array.isArray(tr.trackinfo) && tr.trackinfo.length) {
-        tracks = tr.trackinfo.map((t, i) => ({ pos: String(t.track_num || i + 1), title: (t.title || '').replace(/\|/g, '/'), dur: secToTime(t.duration) }));
+        tracks = tr.trackinfo.map((t, i) => ({ pos: String(isTrack ? i + 1 : t.track_num || i + 1), title: (t.title || '').replace(/\|/g, '/'), dur: secToTime(t.duration) }));
       } else if (ld?.track?.itemListElement) {
         tracks = ld.track.itemListElement.map((e, i) => ({ pos: String(e.position || i + 1), title: (e.item?.name || '').replace(/\|/g, '/'), dur: secToTime(isoToSec(e.item?.duration)) }));
       } else if (isTrack && ld) {
@@ -358,7 +385,8 @@
     o.labels = arr(o.labels).filter((l) => l && typeof l === 'object').map((l) => ({ name: str(l.name), catno: str(l.catno), noCat: !!l.noCat }));
     o.tracks = arr(o.tracks).filter((t) => t && typeof t === 'object').map((t) => Object.assign({}, t, { pos: str(t.pos), title: str(t.title), dur: str(t.dur), artist: str(t.artist) }));
     ['title', 'artist', 'artistSearch', 'year', 'month', 'day', 'country', 'formatName', 'url', 'notes'].forEach((k) => { o[k] = str(o[k]); });
-    return o;
+    return { ...o, mainDescriptions: Array.isArray(o.mainDescriptions)
+      ? o.mainDescriptions.filter((x) => typeof x === 'string') : undefined };
   }
 
   // Reads the saved data (or the data passed by the listener); true if a newer release arrived
@@ -571,7 +599,7 @@
 
   // Returns { type, reason, sure }: "sure" = declared by the source, otherwise an estimate
   function guessType(fmt, size) {
-    const desc = D.descriptions || [];
+    const desc = D.mainDescriptions || D.descriptions || [];
     const tracks = (D.tracks || []).filter((t) => !t.header); // work headers are not tracks
     const n = tracks.length;
     const known = tracks.map((t) => durSec(t.dur)).filter((x) => x != null);
@@ -804,10 +832,9 @@
   //  - sides: "A01" -> "A1"; non-standard sides ("AA", "AA1", "BB") -> A, B, C... in order
   //  - only one track on the side: "A1" -> "A"
   //  - numbers: "01" -> "1"
-  const MEDIA_LABEL = { cd: 'CD', dvd: 'DVD', bluray: 'Blu-ray', bd: 'Blu-ray', sacd: 'SACD', vhs: 'VHS' };
   function normPositions(rows) {
     const tracks = rows.filter((t) => !t.header);
-    const discRe = /^(?:disc|disk)?\s*(\d+)\s*[-–.]\s*0*(\d+)([a-z]?)$/i;
+    const discRe = /^(?:disc|disk)?\s*(\d+)\s*[-–.]\s*0*(\d+)([a-z]*)$/i;
     const sideRe = /^([A-Z])(\1*)\s*0*(\d*)((?:[a-z]|\.\d+|\.[a-z])?)$/; // "A", "AA2", "A01", "A1a"
 
     // 1) trailing dot and media prefix
@@ -900,7 +927,7 @@
     const n = tracks.length;
     const title = D.title || '';
     const styles = (D.styles || []).concat(D.genres || []).map((s) => s.toLowerCase());
-    const desc = D.descriptions || [];
+    const desc = D.mainDescriptions || D.descriptions || [];
     const notes = D.notes || '';
     const out = [], warn = [];
     const share = (re) => (n ? tracks.filter((t) => re.test(t.title)).length / n : 0);
@@ -923,9 +950,11 @@
     const liveShare = isSingle ? (PERF.live.test(focal) ? 1 : 0) : share(PERF.live);
     const liveTitle = /\blive (at|in|from|on)\b|\(live\b|\[live\b/i.test(title);
     const liveNotes = /recorded live\b|live recording/i.test(notes) && !/live (in|at) (the )?studio|live in studio/i.test(notes);
-    if (!out.some((a) => a[0] === 131) && (liveShare > 0.5 || liveTitle || liveNotes)) {
-      out.push([5, 'Live', liveShare > 0.5 ? pct(liveShare) : liveTitle ? 'title' : 'release notes']);
+    if (!out.some((a) => a[0] === 131) && liveShare > 0.5) {
+      out.push([5, 'Live', pct(liveShare)]);
       warn.push('Live: for RYM only if recorded in front of a real audience; studio/radio sessions go under "Live sessions".');
+    } else if (!out.some((a) => a[0] === 131) && (liveTitle || liveNotes)) {
+      warn.push('Possible live content: check whether more than 50% of the tracks are live before selecting Live.');
     }
 
     // Remixes: singles -> only if the focal track is a remix
@@ -1210,8 +1239,9 @@
     // RYM: Digital File or Lossless Digital, never both; prefer the higher quality
     if (D.formatName === 'File' && (D.lossless || desc.some((x) => /FLAC|WAV|ALAC|AIFF/i.test(x)))) fmt = 59;
     const digital = fmt === 58 || fmt === 59;
-    let size = Object.keys(DISC_SIZE).find((k) => desc.includes(k));
-    if (!size && fmt === 95 && desc.includes('LP')) size = '12"';
+    const mainDesc = D.mainDescriptions || desc;
+    let size = Object.keys(DISC_SIZE).find((k) => mainDesc.includes(k));
+    if (!size && fmt === 95 && mainDesc.includes('LP')) size = '12"';
 
     // 1.5 Release type (+ performance attributes, which can move it to "Additional releases")
     let G = guessType(fmt, size);
@@ -1434,15 +1464,15 @@
     const lbl = css(document.createElement('label'), { display: 'block', margin: '4px 3px', cursor: 'pointer' });
     const C = capsState();
     lbl.innerHTML = '<input type="checkbox" id="drym_caps"' + (C.english ? ' checked' : '') + '> English capitalization' +
-      '<div style="opacity:.7;font-size:11px;margin-left:18px">unticked: first letter only (non-English titles)' + (C.auto ? ' · now automatic, title by title, by language' : '') + '</div>';
-    lbl.querySelector('input').addEventListener('change', (e) => { capsMode = e.target.checked; if (filledRaw) fill(); else renderPanel(); });
+      '<div style="opacity:.7;font-size:11px;margin-left:18px">unticked: first letter only (non-English titles)' + (C.auto ? ' · now automatic, title by title, by language' : '') + '. Press Fill form to apply changes.</div>';
+    lbl.querySelector('input').addEventListener('change', (e) => { capsMode = e.target.checked; renderPanel(); });
     bar.appendChild(lbl);
 
     if (isVinyl() && (D.tracks || []).some((t) => t.dur)) { // only if Discogs has track times
       const dl = css(document.createElement('label'), { display: 'block', margin: '4px 3px', cursor: 'pointer' });
       dl.innerHTML = '<input type="checkbox" id="drym_dur"' + (durVinyl ? ' checked' : '') + '> Import track times' +
-        '<div style="opacity:.7;font-size:11px;margin-left:18px">vinyl: on RYM only if printed on the record or the sleeve</div>';
-      dl.querySelector('input').addEventListener('change', (e) => { durVinyl = e.target.checked; if (filledRaw) fill(); else renderPanel(); });
+        '<div style="opacity:.7;font-size:11px;margin-left:18px">vinyl: on RYM only if printed on the record or the sleeve. Press Fill form to apply changes.</div>';
+      dl.querySelector('input').addEventListener('change', (e) => { durVinyl = e.target.checked; renderPanel(); });
       bar.appendChild(dl);
     }
 

@@ -1,0 +1,13 @@
+{
+  "name": "postino-rym",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Regression checks for the Postino userscripts",
+  "engines": { "node": ">=22.8.0" },
+  "scripts": {
+    "test": "node scripts/test.cjs",
+    "test:coverage": "node scripts/test.cjs --coverage",
+    "check": "node --check postino.en.user.js && node --check postino.it.user.js"
+  },
+  "devDependencies": { "jsdom": "26.1.0" }
+}

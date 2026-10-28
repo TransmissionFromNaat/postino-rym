@@ -49,12 +49,16 @@ Two checkboxes in the panel:
 - **English capitalization**: untick it for non-English titles (first letter only).
 - **Import track times** (vinyl only): RYM wants track times on vinyl only if they are printed on the record.
 
+Changing a checkbox does not change the form. Press **Fill form** to apply the settings.
+This action replaces the imported fields. Use **Copy tracks** to copy the prepared tracklist without changing the form.
+
 ## Known limits
 
 - **Split releases** are not fully supported yet (RYM has no API). For now it works best with releases by a single artist.
 - **Proper names** in non-English titles cannot be detected: check them by hand.
 - **Estimates**: the release type and some attributes are estimated when Discogs gives no clear info. The panel always tells you when.
 - **Bandcamp**: only `*.bandcamp.com` pages are supported, not artists with their own domain.
+- **Live content**: a title or note alone does not select the Live attribute. Check the track percentage yourself.
 
 ## Privacy
 
@@ -63,3 +67,20 @@ The script only reads the release from the Discogs API or from the Bandcamp page
 ## Feedback
 
 Bug reports and ideas are welcome. Please open an issue with the link to the Discogs or Bandcamp release.
+
+## Development checks
+
+Use Node.js 22.8 or later. Install the test dependencies and run the checks:
+
+```sh
+npm ci
+npm run check
+npm run test:coverage
+```
+
+The tests run both complete userscripts against local Discogs, Bandcamp, and RYM form fixtures.
+They cover the reported import errors. They do not send data to the live websites.
+Tampermonkey storage and requests, and RYM track-editor functions, use test substitutes.
+Check live Tampermonkey and RYM compatibility separately.
+
+The coverage check requires at least 80% line coverage. Each test run writes `artifacts/test-results.xml`.
